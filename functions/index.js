@@ -1,20 +1,24 @@
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const Razorpay = require("razorpay");
-const crypto = require("crypto"); // Signature verify karne ke liye zaroori
+const crypto = require("crypto");
 
 admin.initializeApp();
 const db = admin.firestore();
 
-// Razorpay instance ko Key ID aur Key Secret ke saath initialize karo
+// --- STARTUP CHECK ---
+// Pehle hi check karlo ki environment variables hain ya nahi.
+if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+  throw new Error(
+      "Razorpay Key ID and Key Secret environment variables must be set!",
+  );
+}
+
 const razorpay = new Razorpay({
-  key_id: "rzp_test_R63e5HcDWJPQmZ", // Aapki Key ID
-  key_secret: "Tq1JUEoj63fpa4DxHM21ipWi", // Aapka Key Secret
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-/**
- * Naya Razorpay order banata hai.
- */
 exports.createRazorpayOrder = functions.https.onCall(async (data, context) => {
   const amountInPaise = data.amount * 100;
 
@@ -31,37 +35,48 @@ exports.createRazorpayOrder = functions.https.onCall(async (data, context) => {
   } catch (error) {
     console.error("Error creating Razorpay order:", error);
     throw new functions.https.HttpsError(
-        "internal", "Could not create order.",
+        "internal",
+        "Could not create order.",
+        error,
     );
   }
 });
 
-
-/**
- * Payment ko verify karta hai aur user ko class ka access deta hai.
- */
-exports.verifyRazorpayPayment=functions.https.onCall(async (data, context) => {
+exports.verifyRazorpayPayment =functions.https.onCall(async (data, context) => {
+  if (!context.auth) {
+    throw new functions.https.HttpsError(
+        "unauthenticated",
+        "The function must be called while authenticated.",
+    );
+  }
   const {orderId, paymentId, signature, classId} = data;
   const userId = context.auth.uid;
 
-  // SIGNATURE VERIFICATION (SECURITY KE LIYE BAHUT ZAROORI)
   const generatedSignature = crypto.createHmac(
-      "sha256", "Tq1JUEoj63fpa4DxHM21ipWi", // Yahan apna Key Secret daalo
-  ).update(orderId + "|" + paymentId)
+      "sha256",
+      process.env.RAZORPAY_KEY_SECRET,
+  ).update(`${orderId}|${paymentId}`)
       .digest("hex");
 
   if (generatedSignature !== signature) {
     throw new functions.https.HttpsError(
-        "invalid-argument", "Payment signature does not match.",
+        "invalid-argument",
+        "Payment signature does not match.",
     );
   }
 
-  // User ke document mein purchased class ki ID add karo
-  const userRef = db.collection("users").doc(userId);
-  await userRef.update({
-    purchasedClasses: admin.firestore.FieldValue.arrayUnion(classId),
-  });
-
-  return {message: "Payment verified and access granted!"};
+  try {
+    const userRef = db.collection("users").doc(userId);
+    await userRef.update({
+      purchasedClasses: admin.firestore.FieldValue.arrayUnion(classId),
+    });
+    return {message: "Payment verified and access granted!"};
+  } catch (error) {
+    console.error("Error updating user document:", error);
+    throw new functions.https.HttpsError(
+        "internal",
+        "Could not update user profile.",
+        error,
+    );
+  }
 });
-
